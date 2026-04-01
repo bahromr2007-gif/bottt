@@ -17,7 +17,7 @@ app = FastAPI()
 # ==================== SOZLAMALAR ====================
 BOT_TOKEN = "8778358404:AAHmM4e2OnROyXLCsGXERCbXd3arzl7kPS0"   # @BotFather dan oling
 ADMIN_IDS = [8735360012]             # O'z Telegram ID ingizni qo'ying
-WEB_APP_URL = "https://YOUR_SITE.com/shop.html"  # shop.html ni joylashtirgan URL
+WEB_APP_URL = "https://bottt-02j7.onrender.com"  # shop.html ni joylashtirgan URL
 
 # ==================== MA'LUMOTLAR ====================
 # Fayllar (oddiy JSON bazasi)
