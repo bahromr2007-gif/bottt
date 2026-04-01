@@ -11,6 +11,8 @@ from telebot import types
 import json
 import os
 from datetime import datetime
+from fastapi import FastAPI
+app = FastAPI()
 
 # ==================== SOZLAMALAR ====================
 BOT_TOKEN = "8778358404:AAHmM4e2OnROyXLCsGXERCbXd3arzl7kPS0"   # @BotFather dan oling
