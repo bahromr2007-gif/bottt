@@ -187,7 +187,9 @@ def my_orders(message):
         text += f"   📌 Holat: {o.get('status', 'Yangi')}\n\n"
     
     bot.send_message(message.chat.id, text, parse_mode="Markdown")
-
+@app.get("/")
+def home():
+    return {"status": "ishlayapti"}
 @bot.message_handler(func=lambda m: m.text == "📞 Aloqa")
 def contact_info(message):
     bot.send_message(
