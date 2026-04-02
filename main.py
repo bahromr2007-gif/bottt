@@ -2,17 +2,20 @@ import telebot
 from telebot import types
 import json
 import os
+import shutil
 from datetime import datetime
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, File, UploadFile, Form, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import logging
+from typing import Optional
+import hashlib
 
 # Logging sozlamalari
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Konfiguratsiya
+# ==================== KONFIGURATSIYA ====================
 BOT_TOKEN = "8778358404:AAHmM4e2OnROyXLCsGXERCbXd3arzl7kPS0"
 RENDER_EXTERNAL_URL = "https://bottt-02j7.onrender.com"
 WEB_APP_URL = f"{RENDER_EXTERNAL_URL}/shop"
@@ -23,10 +26,14 @@ ADMIN_IDS = [8735360012]
 PRODUCTS_FILE = "products.json"
 ORDERS_FILE = "orders.json"
 USERS_FILE = "users.json"
+PHOTOS_DIR = "photos"
 
 # Bot va app
 bot = telebot.TeleBot(BOT_TOKEN)
-app = FastAPI(title="Telegram Shop Bot", version="2.0.0")
+app = FastAPI(title="Telegram Shop Bot", version="3.0.0")
+
+# Papkalarni yaratish
+os.makedirs(PHOTOS_DIR, exist_ok=True)
 
 # State saqlash
 user_states = {}
@@ -88,24 +95,36 @@ def format_price(price):
     return f"{price:,}".replace(",", " ")
 
 
+def save_product_photos(product_id, files):
+    """Mahsulot rasmlarini saqlash"""
+    photos = []
+    for i, file in enumerate(files):
+        if file and file.filename:
+            ext = file.filename.split('.')[-1]
+            filename = f"product_{product_id}_{i+1}.{ext}"
+            filepath = os.path.join(PHOTOS_DIR, filename)
+            with open(filepath, "wb") as f:
+                f.write(file.file.read())
+            photos.append(f"/photos/{filename}")
+    return photos
+
+
 # ==================== KLAVIATURALAR ====================
 def get_main_menu(user_id):
     """Asosiy menyu"""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     
-    # Web App tugmasi
     shop_btn = types.KeyboardButton(
         "🛍️ Do'konni ochish",
         web_app=types.WebAppInfo(url=WEB_APP_URL)
     )
     markup.add(shop_btn)
     
-    # Boshqa tugmalar
     markup.add(
         types.KeyboardButton("📦 Mening zakazlarim"),
-        types.KeyboardButton("📞 Aloqa")
+        types.KeyboardButton("📞 Aloqa"),
+        types.KeyboardButton("ℹ️ Yordam")
     )
-    markup.add(types.KeyboardButton("ℹ️ Yordam"))
     
     if is_admin(user_id):
         markup.add(types.KeyboardButton("👨‍💼 Admin panel"))
@@ -118,8 +137,9 @@ def get_admin_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
         types.KeyboardButton("➕ Mahsulot qo'shish"),
-        types.KeyboardButton("📋 Barcha mahsulotlar"),
-        types.KeyboardButton("📊 Statistika")
+        types.KeyboardButton("📋 Mahsulotlar ro'yxati"),
+        types.KeyboardButton("📊 Statistika"),
+        types.KeyboardButton("📦 Barcha zakazlar")
     )
     markup.add(types.KeyboardButton("🔙 Asosiy menyu"))
     return markup
@@ -140,7 +160,6 @@ def start(message):
     users = get_users()
     
     if str(user_id) not in users:
-        # Telefon raqam so'rash
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
         contact_btn = types.KeyboardButton(
             "📱 Telefon raqamimni yuborish",
@@ -176,7 +195,8 @@ def handle_contact(message):
         users = get_users()
         users[str(user_id)] = {
             "user_id": user_id,
-            "name": message.from_user.first_name,
+            "first_name": message.from_user.first_name,
+            "last_name": message.from_user.last_name or "",
             "username": message.from_user.username or "",
             "phone": message.contact.phone_number,
             "joined": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -201,7 +221,8 @@ def handle_contact(message):
                     f"🆕 *Yangi foydalanuvchi!*\n\n"
                     f"👤 {message.from_user.first_name}\n"
                     f"📞 {message.contact.phone_number}\n"
-                    f"🆔 {user_id}",
+                    f"🆔 {user_id}\n"
+                    f"👤 @{message.from_user.username or 'None'}",
                     parse_mode="Markdown"
                 )
             except:
@@ -233,14 +254,14 @@ def add_product_start(message):
     user_states[message.from_user.id] = {"state": "add_name", "temp": {}}
     bot.send_message(
         message.chat.id,
-        "📝 *1/4 - Mahsulot nomi*\n\n"
+        "📝 *1/6 - Mahsulot nomi*\n\n"
         "Mahsulot nomini kiriting:",
         parse_mode="Markdown",
         reply_markup=get_cancel_btn()
     )
 
 
-@bot.message_handler(func=lambda m: m.text == "📋 Barcha mahsulotlar")
+@bot.message_handler(func=lambda m: m.text == "📋 Mahsulotlar ro'yxati")
 def list_products(message):
     """Barcha mahsulotlarni ko'rish"""
     if not is_admin(message.from_user.id):
@@ -251,21 +272,38 @@ def list_products(message):
         bot.send_message(message.chat.id, "📭 *Hozircha mahsulot yo'q*", parse_mode="Markdown")
         return
     
-    text = "📋 *Barcha mahsulotlar:*\n\n"
     for p in products:
-        text += f"🆔 #{p['id']}\n"
-        text += f"📌 {p['name']}\n"
-        text += f"💰 {format_price(p['price'])} so'm\n"
-        text += f"🏷 {p['category']}\n"
-        text += f"✅ {'Mavjud' if p.get('available', True) else 'Mavjud emas'}\n"
-        text += "─" * 20 + "\n\n"
-    
-    # Uzun xabarlarni bo'lib yuborish
-    if len(text) > 4000:
-        for i in range(0, len(text), 4000):
-            bot.send_message(message.chat.id, text[i:i+4000], parse_mode="Markdown")
-    else:
-        bot.send_message(message.chat.id, text, parse_mode="Markdown")
+        text = (
+            f"🆔 *ID:* {p['id']}\n"
+            f"📌 *Nomi:* {p['name']}\n"
+            f"💰 *Narxi:* {format_price(p['price'])} so'm\n"
+            f"🏷 *Kategoriya:* {p['category']}\n"
+            f"📸 *Rasmlar:* {len(p.get('photos', []))} ta\n"
+            f"✅ *Holat:* {'Mavjud' if p.get('available', True) else 'Mavjud emas'}\n"
+        )
+        
+        markup = types.InlineKeyboardMarkup()
+        markup.add(
+            types.InlineKeyboardButton("🗑 O'chirish", callback_data=f"del_prod_{p['id']}"),
+            types.InlineKeyboardButton("📝 Tahrirlash", callback_data=f"edit_prod_{p['id']}")
+        )
+        
+        # Agar rasm bo'lsa, rasm bilan yuborish
+        photos = p.get('photos', [])
+        if photos and os.path.exists(photos[0][1:] if photos[0].startswith('/') else photos[0]):
+            try:
+                with open(photos[0][1:] if photos[0].startswith('/') else photos[0], 'rb') as photo:
+                    bot.send_photo(
+                        message.chat.id,
+                        photo,
+                        caption=text,
+                        parse_mode="Markdown",
+                        reply_markup=markup
+                    )
+            except:
+                bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
+        else:
+            bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
 
 
 @bot.message_handler(func=lambda m: m.text == "📊 Statistika")
@@ -283,16 +321,124 @@ def show_stats(message):
     total_users = len(users)
     total_products = len(products)
     
+    # Kunlik, oylik statistikalar
+    today = datetime.now().strftime("%Y-%m-%d")
+    today_orders = [o for o in orders if o.get('date', '').startswith(today)]
+    today_sales = sum(o.get('total', 0) for o in today_orders)
+    
     stats_text = (
         f"📊 *Bot statistikasi*\n\n"
-        f"👥 Foydalanuvchilar: *{total_users}*\n"
-        f"🛍️ Mahsulotlar: *{total_products}*\n"
-        f"📦 Zakazlar: *{total_orders}*\n"
-        f"💰 Umumiy sotuv: *{format_price(total_sales)} so'm*\n"
-        f"📈 O'rtacha zakaz: *{format_price(total_sales // total_orders) if total_orders > 0 else 0} so'm*"
+        f"👥 *Foydalanuvchilar:* {total_users}\n"
+        f"🛍️ *Mahsulotlar:* {total_products}\n"
+        f"📦 *Jami zakazlar:* {total_orders}\n"
+        f"💰 *Umumiy sotuv:* {format_price(total_sales)} so'm\n"
+        f"📈 *O'rtacha zakaz:* {format_price(total_sales // total_orders) if total_orders > 0 else 0} so'm\n\n"
+        f"📅 *Bugungi statistik:*\n"
+        f"📦 Zakazlar: {len(today_orders)}\n"
+        f"💰 Sotuv: {format_price(today_sales)} so'm"
     )
     
     bot.send_message(message.chat.id, stats_text, parse_mode="Markdown")
+
+
+@bot.message_handler(func=lambda m: m.text == "📦 Barcha zakazlar")
+def list_all_orders(message):
+    """Barcha zakazlarni ko'rish"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    orders = get_orders()
+    if not orders:
+        bot.send_message(message.chat.id, "📭 *Hozircha zakaz yo'q*", parse_mode="Markdown")
+        return
+    
+    for order in orders[-20:]:  # Oxirgi 20 ta zakaz
+        user = get_users().get(str(order.get('user_id')), {})
+        text = (
+            f"🆔 *Zakaz #{order['id']}*\n"
+            f"📅 *Sana:* {order['date']}\n"
+            f"👤 *Mijoz:* {order.get('user_name', 'Noma\'lum')}\n"
+            f"📞 *Telefon:* {order.get('user_phone', 'Noma\'lum')}\n"
+            f"📍 *Manzil:* {order.get('address', 'Noma\'lum')}\n"
+            f"💰 *Jami:* {format_price(order['total'])} so'm\n"
+            f"📦 *Mahsulotlar:*\n"
+        )
+        
+        for item in order.get('items', []):
+            text += f"  • {item.get('name')} x{item.get('qty', 1)} = {format_price(item.get('price', 0) * item.get('qty', 1))} so'm\n"
+        
+        if order.get('note'):
+            text += f"💬 *Izoh:* {order['note']}\n"
+        
+        text += f"✅ *Holat:* {'Yangi' if order.get('status') == 'new' else order.get('status')}"
+        
+        markup = types.InlineKeyboardMarkup()
+        markup.add(
+            types.InlineKeyboardButton("✅ Qabul qilindi", callback_data=f"order_status_{order['id']}_accepted"),
+            types.InlineKeyboardButton("🚚 Yetkazilmoqda", callback_data=f"order_status_{order['id']}_delivering"),
+            types.InlineKeyboardButton("✅ Yetkazildi", callback_data=f"order_status_{order['id']}_delivered")
+        )
+        
+        bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('order_status_'))
+def handle_order_status(call):
+    """Zakaz holatini o'zgartirish"""
+    if not is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "Siz admin emassiz!", show_alert=True)
+        return
+    
+    parts = call.data.split('_')
+    order_id = int(parts[2])
+    status = parts[3]
+    
+    orders = get_orders()
+    for order in orders:
+        if order['id'] == order_id:
+            order['status'] = status
+            save_orders(orders)
+            
+            # Mijozga xabar
+            try:
+                status_text = {
+                    'accepted': '✅ Qabul qilindi',
+                    'delivering': '🚚 Yetkazilmoqda',
+                    'delivered': '✅ Yetkazildi'
+                }.get(status, status)
+                
+                bot.send_message(
+                    order['user_id'],
+                    f"📦 *Zakaz #{order_id} holati:* {status_text}\n\n"
+                    f"Tez orada siz bilan bog'lanamiz! ☎️",
+                    parse_mode="Markdown"
+                )
+            except:
+                pass
+            
+            bot.answer_callback_query(call.id, f"Holat o'zgartirildi: {status_text}")
+            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+            break
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('del_prod_'))
+def delete_product(call):
+    """Mahsulotni o'chirish"""
+    if not is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "Siz admin emassiz!", show_alert=True)
+        return
+    
+    product_id = int(call.data.split('_')[2])
+    products = get_products()
+    products = [p for p in products if p['id'] != product_id]
+    save_products(products)
+    
+    bot.answer_callback_query(call.id, "Mahsulot o'chirildi!")
+    bot.edit_message_caption(
+        call.message.chat.id,
+        call.message.message_id,
+        caption="✅ Mahsulot o'chirildi"
+    )
 
 
 @bot.message_handler(func=lambda m: m.text == "🔙 Asosiy menyu")
@@ -336,15 +482,23 @@ def my_orders(message):
         )
         return
     
-    text = "📦 *Sizning zakazlaringiz:*\n\n"
-    for order in user_orders[-10:]:  # Oxirgi 10 ta zakaz
-        text += f"🆔 #{order['id']}\n"
-        text += f"📅 {order['date']}\n"
-        text += f"💰 {format_price(order['total'])} so'm\n"
-        text += f"📦 {len(order.get('items', []))} ta mahsulot\n"
-        text += "─" * 20 + "\n\n"
-    
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+    for order in user_orders[-10:]:
+        status_text = {
+            'new': '🆕 Yangi',
+            'accepted': '✅ Qabul qilingan',
+            'delivering': '🚚 Yetkazilmoqda',
+            'delivered': '✅ Yetkazilgan'
+        }.get(order.get('status', 'new'), '🆕 Yangi')
+        
+        text = (
+            f"📦 *Zakaz #{order['id']}*\n"
+            f"📅 {order['date']}\n"
+            f"💰 {format_price(order['total'])} so'm\n"
+            f"📦 {len(order.get('items', []))} ta mahsulot\n"
+            f"✅ *Holat:* {status_text}\n"
+            f"─" * 20 + "\n"
+        )
+        bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
 
 @bot.message_handler(func=lambda m: m.text == "📞 Aloqa")
@@ -352,10 +506,11 @@ def contact_info(message):
     """Aloqa ma'lumotlari"""
     text = (
         "📞 *Bog'lanish ma'lumotlari*\n\n"
-        "👨‍💼 Admin: @admin_username\n"
-        "📱 Telefon: +998 XX XXX XX XX\n"
-        "📧 Email: admin@example.com\n\n"
-        "⚠️ *Ish vaqti:* 9:00 - 21:00"
+        "👨‍💼 *Admin:* @admin_username\n"
+        "📱 *Telefon:* +998 XX XXX XX XX\n"
+        "📧 *Email:* admin@example.com\n\n"
+        "⚠️ *Ish vaqti:* 9:00 - 21:00\n"
+        "📅 *Dam olish kuni:* Yakshanba"
     )
     bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
@@ -364,11 +519,17 @@ def contact_info(message):
 def help_info(message):
     """Yordam ma'lumotlari"""
     text = (
-        "ℹ️ *Yordam* \n\n"
+        "ℹ️ *Yordam bo'limi*\n\n"
         "🛍️ *Do'konni ochish* - Mahsulotlarni ko'rish va xarid qilish\n"
-        "📦 *Mening zakazlarim* - Tarixni ko'rish\n"
+        "📦 *Mening zakazlarim* - Zakaz tarixini ko'rish\n"
         "📞 *Aloqa* - Admin bilan bog'lanish\n\n"
-        "❓ *Savollaringiz bo'lsa, @admin_username ga yozing*"
+        "❓ *Savollaringiz bo'lsa:* @admin_username\n\n"
+        "📝 *Zakaz berish tartibi:*\n"
+        "1. Do'konni oching\n"
+        "2. Mahsulotlarni tanlang\n"
+        "3. Savatga qo'shing\n"
+        "4. Manzilni kiriting\n"
+        "5. Zakazni tasdiqlang"
     )
     bot.send_message(message.chat.id, text, parse_mode="Markdown")
 
@@ -381,13 +542,15 @@ def handle_webapp_order(message):
         logger.info(f"New order from {message.from_user.id}: {data}")
         
         orders = get_orders()
+        users = get_users()
+        user_info = users.get(str(message.from_user.id), {})
         
         # Yangi zakaz
         new_order = {
             "id": len(orders) + 1,
             "user_id": message.from_user.id,
-            "user_name": message.from_user.first_name,
-            "user_phone": get_users().get(str(message.from_user.id), {}).get("phone", ""),
+            "user_name": user_info.get('first_name', message.from_user.first_name),
+            "user_phone": user_info.get('phone', 'Noma\'lum'),
             "items": data.get("items", []),
             "total": data.get("total", 0),
             "address": data.get("address", ""),
@@ -400,39 +563,66 @@ def handle_webapp_order(message):
         save_orders(orders)
         
         # Foydalanuvchiga xabar
+        items_text = "\n".join([
+            f"• {item.get('name', '')} x{item.get('qty', 1)} = {format_price(item.get('price', 0) * item.get('qty', 1))} so'm"
+            for item in new_order['items']
+        ])
+        
         bot.send_message(
             message.chat.id,
             f"✅ *Zakaz qabul qilindi!*\n\n"
-            f"🆔 #{new_order['id']}\n"
-            f"💰 {format_price(new_order['total'])} so'm\n\n"
-            f"📦 *Mahsulotlar:*\n" +
-            "\n".join([f"• {item.get('name', '')} x{item.get('qty', 1)}" for item in new_order['items']]) +
-            f"\n\n📍 *Manzil:* {new_order['address']}\n"
+            f"🆔 *Zakaz #:* {new_order['id']}\n"
+            f"💰 *Jami:* {format_price(new_order['total'])} so'm\n\n"
+            f"📦 *Mahsulotlar:*\n{items_text}\n\n"
+            f"📍 *Manzil:* {new_order['address']}\n"
             f"💬 *Izoh:* {new_order['note'] or 'Yo‘q'}\n\n"
-            f"Tez orada admin siz bilan bog'lanadi! ☎️",
+            f"Tez orada admin siz bilan bog'lanadi! ☎️\n"
+            f"Zakaz holatini \"Mening zakazlarim\" bo'limidan kuzatishingiz mumkin.",
             parse_mode="Markdown"
         )
         
-        # Adminlarga xabar
+        # Adminlarga to'liq ma'lumot bilan xabar
         for admin_id in ADMIN_IDS:
             try:
-                items_text = "\n".join([
-                    f"  • {item.get('name', '')} x{item.get('qty', 1)} = {format_price(item.get('price', 0) * item.get('qty', 1))} so'm"
-                    for item in new_order['items']
-                ])
+                admin_text = (
+                    f"🆕 *YANGI ZAKAZ!* 🆕\n\n"
+                    f"📋 *Zakaz ma'lumotlari:*\n"
+                    f"🆔 Zakaz ID: #{new_order['id']}\n"
+                    f"📅 Sana: {new_order['date']}\n\n"
+                    f"👤 *Mijoz ma'lumotlari:*\n"
+                    f"Ismi: {new_order['user_name']}\n"
+                    f"Telefon: {new_order['user_phone']}\n"
+                    f"Telegram ID: {new_order['user_id']}\n"
+                    f"Username: @{user_info.get('username', 'None')}\n\n"
+                    f"📍 *Yetkazib berish manzili:*\n{new_order['address']}\n\n"
+                    f"📦 *Zakaz tarkibi:*\n"
+                )
+                
+                for item in new_order['items']:
+                    admin_text += f"  • {item.get('name')} x{item.get('qty', 1)} = {format_price(item.get('price', 0) * item.get('qty', 1))} so'm\n"
+                
+                admin_text += f"\n💰 *Jami summa:* {format_price(new_order['total'])} so'm\n"
+                
+                if new_order.get('note'):
+                    admin_text += f"\n💬 *Mijoz izohi:*\n{new_order['note']}\n"
+                
+                admin_text += f"\n🔄 *Holat:* Yangi\n"
+                admin_text += f"─" * 30 + "\n"
+                admin_text += f"📊 /stats - Statistika ko'rish\n"
+                admin_text += f"📦 /orders - Barcha zakazlar"
+                
+                markup = types.InlineKeyboardMarkup()
+                markup.add(
+                    types.InlineKeyboardButton("✅ Qabul qilish", callback_data=f"order_status_{new_order['id']}_accepted"),
+                    types.InlineKeyboardButton("🚚 Yetkazish", callback_data=f"order_status_{new_order['id']}_delivering"),
+                    types.InlineKeyboardButton("👤 Mijoz bilan bog'lanish", url=f"tg://user?id={new_order['user_id']}")
+                )
                 
                 bot.send_message(
                     admin_id,
-                    f"🆕 *Yangi zakaz!*\n\n"
-                    f"🆔 #{new_order['id']}\n"
-                    f"👤 {new_order['user_name']}\n"
-                    f"📞 {new_order['user_phone']}\n"
-                    f"📦 *Mahsulotlar:*\n{items_text}\n"
-                    f"💰 *Jami:* {format_price(new_order['total'])} so'm\n"
-                    f"📍 *Manzil:* {new_order['address']}\n"
-                    f"💬 *Izoh:* {new_order['note'] or 'Yo‘q'}\n"
-                    f"📅 *Vaqt:* {new_order['date']}",
-                    parse_mode="Markdown"
+                    admin_text,
+                    parse_mode="Markdown",
+                    reply_markup=markup
                 )
             except Exception as e:
                 logger.error(f"Error sending to admin: {e}")
@@ -442,14 +632,15 @@ def handle_webapp_order(message):
         bot.send_message(
             message.chat.id,
             "❌ *Xatolik yuz berdi!*\n\n"
-            "Iltimos, qaytadan urinib ko'ring.",
+            "Iltimos, qaytadan urinib ko'ring.\n"
+            "Agar xatolik takrorlansa, admin bilan bog'lang.",
             parse_mode="Markdown"
         )
 
 
 @bot.message_handler(content_types=["text"])
 def handle_states(message):
-    """State larni boshqarish"""
+    """State larni boshqarish (Mahsulot qo'shish)"""
     user_id = message.from_user.id
     state_data = user_states.get(user_id, {"state": "idle"})
     state = state_data.get("state", "idle")
@@ -460,7 +651,7 @@ def handle_states(message):
         user_states[user_id]["state"] = "add_desc"
         bot.send_message(
             message.chat.id,
-            "📝 *2/4 - Tavsif*\n\n"
+            "📝 *2/6 - Tavsif*\n\n"
             "Mahsulot tavsifini kiriting:",
             parse_mode="Markdown"
         )
@@ -470,7 +661,7 @@ def handle_states(message):
         user_states[user_id]["state"] = "add_price"
         bot.send_message(
             message.chat.id,
-            "💰 *3/4 - Narx*\n\n"
+            "💰 *3/6 - Narx*\n\n"
             "Mahsulot narxini kiriting (so'mda):\n"
             "Masalan: 50000",
             parse_mode="Markdown"
@@ -495,7 +686,7 @@ def handle_states(message):
             
             bot.send_message(
                 message.chat.id,
-                "🏷️ *4/4 - Kategoriya*\n\n"
+                "🏷️ *4/6 - Kategoriya*\n\n"
                 "Mahsulot kategoriyasini tanlang:",
                 parse_mode="Markdown",
                 reply_markup=markup
@@ -510,16 +701,36 @@ def handle_states(message):
             )
     
     elif state == "add_category":
-        temp = user_states[user_id]["temp"]
-        temp["category"] = message.text
+        user_states[user_id]["temp"]["category"] = message.text
+        user_states[user_id]["state"] = "add_photos"
+        bot.send_message(
+            message.chat.id,
+            "📸 *5/6 - Rasmlar*\n\n"
+            "Endi mahsulot rasmlarini yuboring.\n"
+            "Bir vaqtning o'zida 5 tagacha rasm yuborishingiz mumkin.\n\n"
+            "Rasmlarni yuboring yoki 'Keyingi' tugmasini bosing:",
+            parse_mode="Markdown",
+            reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add(
+                types.KeyboardButton("⏭️ Keyingi"),
+                types.KeyboardButton("❌ Bekor qilish")
+            )
+        )
+        user_states[user_id]["temp"]["photos"] = []
+    
+    elif state == "add_photos":
+        user_states[user_id]["state"] = "add_available"
         
+        # Mahsulotni saqlash
+        temp = user_states[user_id]["temp"]
         products = get_products()
+        
         new_product = {
             "id": len(products) + 1,
             "name": temp["name"],
             "description": temp["description"],
             "price": temp["price"],
             "category": temp["category"],
+            "photos": temp.get("photos", []),
             "available": True,
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
@@ -530,16 +741,77 @@ def handle_states(message):
         # State ni tozalash
         user_states[user_id] = {"state": "idle"}
         
-        bot.send_message(
-            message.chat.id,
+        # Natijani ko'rsatish
+        result_text = (
             f"✅ *Mahsulot muvaffaqiyatli qo'shildi!*\n\n"
-            f"📌 {new_product['name']}\n"
-            f"💰 {format_price(new_product['price'])} so'm\n"
-            f"🏷 {new_product['category']}\n\n"
-            f"Endi uni do'konda ko'rishingiz mumkin 🛍️",
-            parse_mode="Markdown",
-            reply_markup=get_admin_menu()
+            f"📌 *Nomi:* {new_product['name']}\n"
+            f"💰 *Narxi:* {format_price(new_product['price'])} so'm\n"
+            f"🏷 *Kategoriya:* {new_product['category']}\n"
+            f"📸 *Rasmlar:* {len(new_product['photos'])} ta\n\n"
+            f"Endi uni do'konda ko'rishingiz mumkin 🛍️"
         )
+        
+        # Agar rasm bo'lsa, rasm bilan yuborish
+        if new_product['photos'] and os.path.exists(new_product['photos'][0][1:]):
+            try:
+                with open(new_product['photos'][0][1:], 'rb') as photo:
+                    bot.send_photo(
+                        message.chat.id,
+                        photo,
+                        caption=result_text,
+                        parse_mode="Markdown",
+                        reply_markup=get_admin_menu()
+                    )
+            except:
+                bot.send_message(message.chat.id, result_text, parse_mode="Markdown", reply_markup=get_admin_menu())
+        else:
+            bot.send_message(message.chat.id, result_text, parse_mode="Markdown", reply_markup=get_admin_menu())
+
+
+@bot.message_handler(content_types=["photo"])
+def handle_photos(message):
+    """Rasmlarni qabul qilish"""
+    user_id = message.from_user.id
+    state_data = user_states.get(user_id, {})
+    
+    if state_data.get("state") == "add_photos":
+        temp = state_data.get("temp", {})
+        photos = temp.get("photos", [])
+        
+        if len(photos) >= 5:
+            bot.send_message(message.chat.id, "❌ Maksimum 5 ta rasm yuborishingiz mumkin!")
+            return
+        
+        # Rasmni saqlash
+        try:
+            file_id = message.photo[-1].file_id
+            file_info = bot.get_file(file_id)
+            downloaded_file = bot.download_file(file_info.file_path)
+            
+            # Rasm nomi
+            filename = f"product_{user_id}_{datetime.now().timestamp()}_{len(photos)+1}.jpg"
+            filepath = os.path.join(PHOTOS_DIR, filename)
+            
+            with open(filepath, 'wb') as f:
+                f.write(downloaded_file)
+            
+            photos.append(f"/{filepath}")
+            user_states[user_id]["temp"]["photos"] = photos
+            
+            remaining = 5 - len(photos)
+            bot.send_message(
+                message.chat.id,
+                f"✅ Rasm qabul qilindi! ({len(photos)}/5)\n"
+                f"Yana {remaining} ta rasm yuborishingiz mumkin.\n\n"
+                f"Rasmlar tugagach '⏭️ Keyingi' tugmasini bosing.",
+                reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add(
+                    types.KeyboardButton("⏭️ Keyingi"),
+                    types.KeyboardButton("❌ Bekor qilish")
+                )
+            )
+        except Exception as e:
+            logger.error(f"Photo save error: {e}")
+            bot.send_message(message.chat.id, "❌ Rasm saqlashda xatolik! Qaytadan urinib ko'ring.")
 
 
 # ==================== FASTAPI ENDPOINTS ====================
@@ -554,55 +826,113 @@ async def home():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Telegram Shop Bot</title>
         <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
             body {
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
                 display: flex;
                 justify-content: center;
                 align-items: center;
-                min-height: 100vh;
-                margin: 0;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
+                padding: 20px;
             }
             .container {
+                background: white;
+                border-radius: 24px;
+                padding: 40px;
+                max-width: 500px;
+                width: 100%;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
                 text-align: center;
-                padding: 2rem;
             }
             h1 {
-                font-size: 3rem;
-                margin-bottom: 1rem;
-            }
-            p {
-                font-size: 1.2rem;
-                opacity: 0.9;
+                color: #333;
+                margin-bottom: 10px;
+                font-size: 32px;
             }
             .status {
-                background: rgba(255,255,255,0.2);
-                padding: 1rem;
-                border-radius: 1rem;
-                margin-top: 2rem;
+                background: #4CAF50;
+                color: white;
+                padding: 12px;
+                border-radius: 12px;
+                margin: 20px 0;
+                font-weight: bold;
+            }
+            .stats {
+                display: grid;
+                grid-template-columns: repeat(2, 1fr);
+                gap: 16px;
+                margin: 20px 0;
+            }
+            .stat-card {
+                background: #f5f5f5;
+                padding: 16px;
+                border-radius: 12px;
+            }
+            .stat-number {
+                font-size: 28px;
+                font-weight: bold;
+                color: #667eea;
+            }
+            .stat-label {
+                color: #666;
+                margin-top: 5px;
+            }
+            .btn {
+                display: inline-block;
+                background: #667eea;
+                color: white;
+                padding: 12px 24px;
+                text-decoration: none;
+                border-radius: 12px;
+                margin-top: 20px;
+                font-weight: bold;
             }
         </style>
     </head>
     <body>
         <div class="container">
             <h1>🛍️ Telegram Shop Bot</h1>
-            <p>Bot ishlayapti ✅</p>
-            <div class="status">
-                <strong>📊 Statistika</strong><br>
-                <span id="stats">Yuklanmoqda...</span>
+            <div class="status">✅ Bot ishlayapti</div>
+            <div class="stats" id="stats">
+                <div class="stat-card">
+                    <div class="stat-number" id="users">-</div>
+                    <div class="stat-label">Foydalanuvchilar</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number" id="products">-</div>
+                    <div class="stat-label">Mahsulotlar</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number" id="orders">-</div>
+                    <div class="stat-label">Zakazlar</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number" id="sales">-</div>
+                    <div class="stat-label">Sotuv (so'm)</div>
+                </div>
             </div>
+            <a href="/shop" class="btn">🛍️ Do'konni ochish</a>
         </div>
         <script>
-            fetch('/stats')
-                .then(res => res.json())
-                .then(data => {
-                    document.getElementById('stats').innerHTML = `
-                        👥 Foydalanuvchilar: ${data.users}<br>
-                        🛍️ Mahsulotlar: ${data.products}<br>
-                        📦 Zakazlar: ${data.orders}
-                    `;
-                });
+            async function loadStats() {
+                try {
+                    const response = await fetch('/stats');
+                    const data = await response.json();
+                    document.getElementById('users').textContent = data.users;
+                    document.getElementById('products').textContent = data.products;
+                    document.getElementById('orders').textContent = data.orders;
+                    document.getElementById('sales').textContent = (data.sales / 1000000).toFixed(1) + 'M';
+                } catch(e) {
+                    console.error('Error loading stats:', e);
+                }
+            }
+            loadStats();
+            setInterval(loadStats, 30000);
         </script>
     </body>
     </html>
@@ -612,15 +942,14 @@ async def home():
 @app.get("/shop")
 async def shop_page():
     """Web App sahifasi"""
-    html_content = get_webapp_html()
-    return HTMLResponse(content=html_content)
+    with open("index.html", "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
 
 
 @app.get("/webapp_products.json")
 async def get_products_json():
     """Mahsulotlar API"""
     products = get_products()
-    # Web App uchun mos format
     webapp_products = []
     for p in products:
         if p.get('available', True):
@@ -630,6 +959,7 @@ async def get_products_json():
                 "description": p.get('description', ''),
                 "price": p['price'],
                 "category": p.get('category', '🎁 Boshqa'),
+                "photos": p.get('photos', []),
                 "available": True
             })
     return JSONResponse(webapp_products)
@@ -638,10 +968,13 @@ async def get_products_json():
 @app.get("/stats")
 async def get_stats():
     """Statistika API"""
+    orders = get_orders()
+    total_sales = sum(o.get('total', 0) for o in orders)
     return {
         "users": len(get_users()),
         "products": len(get_products()),
-        "orders": len(get_orders())
+        "orders": len(orders),
+        "sales": total_sales
     }
 
 
@@ -672,15 +1005,7 @@ async def startup_event():
                 "description": "Bu test mahsulot. Admin tomonidan o'zgartirilishi mumkin.",
                 "price": 50000,
                 "category": "🎁 Boshqa",
-                "available": True,
-                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            },
-            {
-                "id": 2,
-                "name": "Premium Mahsulot",
-                "description": "Yuqori sifatli mahsulot",
-                "price": 150000,
-                "category": "🎁 Boshqa",
+                "photos": [],
                 "available": True,
                 "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
@@ -698,481 +1023,6 @@ async def startup_event():
         logger.error(f"Webhook setup failed: {e}")
 
 
-def get_webapp_html():
-    """Web App HTML kodi"""
-    return '''<!DOCTYPE html>
-<html lang="uz">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>🛍️ Do'konim</title>
-<script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  
-  :root {
-    --primary: #FF6B35;
-    --primary-dark: #e55a26;
-    --bg: #F7F8FC;
-    --card: #FFFFFF;
-    --text: #1A202C;
-    --muted: #718096;
-    --border: #E2E8F0;
-    --shadow: 0 2px 8px rgba(0,0,0,0.05);
-    --radius: 12px;
-  }
-  
-  body {
-    font-family: 'Inter', sans-serif;
-    background: var(--bg);
-    color: var(--text);
-    padding-bottom: 70px;
-  }
-  
-  /* Header */
-  .header {
-    background: var(--card);
-    padding: 16px;
-    position: sticky;
-    top: 0;
-    z-index: 100;
-    box-shadow: var(--shadow);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-  
-  .logo {
-    font-size: 20px;
-    font-weight: 800;
-    background: linear-gradient(135deg, var(--primary), #FF8C42);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-  }
-  
-  .cart-icon {
-    position: relative;
-    cursor: pointer;
-    background: var(--bg);
-    padding: 8px 12px;
-    border-radius: 50px;
-    font-weight: 600;
-  }
-  
-  .cart-count {
-    position: absolute;
-    top: -5px;
-    right: -5px;
-    background: var(--primary);
-    color: white;
-    border-radius: 50%;
-    width: 18px;
-    height: 18px;
-    font-size: 11px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  
-  /* Search */
-  .search-box {
-    padding: 12px 16px;
-  }
-  
-  .search-input {
-    width: 100%;
-    padding: 12px 16px;
-    border: 1px solid var(--border);
-    border-radius: 50px;
-    font-size: 14px;
-    outline: none;
-    background: var(--card);
-  }
-  
-  /* Categories */
-  .categories {
-    padding: 8px 16px;
-    overflow-x: auto;
-    white-space: nowrap;
-    scrollbar-width: none;
-  }
-  
-  .category-btn {
-    display: inline-block;
-    padding: 8px 20px;
-    margin-right: 8px;
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 50px;
-    font-size: 14px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-  
-  .category-btn.active {
-    background: var(--primary);
-    color: white;
-    border-color: var(--primary);
-  }
-  
-  /* Products */
-  .products {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 12px;
-    padding: 12px;
-  }
-  
-  .product-card {
-    background: var(--card);
-    border-radius: var(--radius);
-    overflow: hidden;
-    box-shadow: var(--shadow);
-  }
-  
-  .product-image {
-    width: 100%;
-    aspect-ratio: 1;
-    background: linear-gradient(135deg, #f5f5f5, #e5e5e5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 48px;
-  }
-  
-  .product-info {
-    padding: 12px;
-  }
-  
-  .product-name {
-    font-size: 14px;
-    font-weight: 700;
-    margin-bottom: 4px;
-  }
-  
-  .product-price {
-    font-size: 16px;
-    font-weight: 800;
-    color: var(--primary);
-    margin-bottom: 8px;
-  }
-  
-  .add-btn {
-    width: 100%;
-    padding: 8px;
-    background: var(--primary);
-    color: white;
-    border: none;
-    border-radius: 8px;
-    font-weight: 600;
-    cursor: pointer;
-  }
-  
-  /* Cart Modal */
-  .modal {
-    display: none;
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    background: var(--card);
-    border-radius: 20px 20px 0 0;
-    max-height: 80vh;
-    overflow-y: auto;
-    z-index: 1000;
-    box-shadow: 0 -2px 20px rgba(0,0,0,0.1);
-  }
-  
-  .modal.show {
-    display: block;
-  }
-  
-  .modal-header {
-    padding: 16px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-  
-  .cart-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--border);
-  }
-  
-  .checkout-btn {
-    width: 100%;
-    padding: 16px;
-    background: var(--primary);
-    color: white;
-    border: none;
-    font-size: 16px;
-    font-weight: 700;
-    cursor: pointer;
-  }
-  
-  .overlay {
-    display: none;
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0,0,0,0.5);
-    z-index: 999;
-  }
-  
-  .overlay.show {
-    display: block;
-  }
-</style>
-</head>
-<body>
-<div class="header">
-    <div class="logo">🛍️ DO'KON</div>
-    <div class="cart-icon" onclick="openCart()">
-        🛒
-        <span class="cart-count" id="cartCount">0</span>
-    </div>
-</div>
-
-<div class="search-box">
-    <input type="text" class="search-input" placeholder="🔍 Qidirish..." id="searchInput" oninput="filterProducts()">
-</div>
-
-<div class="categories" id="categories"></div>
-
-<div class="products" id="products"></div>
-
-<div class="overlay" id="overlay" onclick="closeCart()"></div>
-<div class="modal" id="cartModal">
-    <div class="modal-header">
-        <h3>🛒 Savatcha</h3>
-        <button onclick="closeCart()" style="background:none;border:none;font-size:24px;">&times;</button>
-    </div>
-    <div id="cartItems"></div>
-    <div style="padding:16px;border-top:1px solid var(--border)">
-        <div style="display:flex;justify-content:space-between;margin-bottom:16px">
-            <strong>Jami:</strong>
-            <strong id="cartTotal">0 so'm</strong>
-        </div>
-        <button class="checkout-btn" onclick="checkout()">✅ Zakaz berish</button>
-    </div>
-</div>
-
-<script>
-const tg = window.Telegram.WebApp;
-tg.ready();
-tg.expand();
-
-let products = [];
-let cart = {};
-let currentCategory = 'all';
-
-async function loadProducts() {
-    try {
-        const response = await fetch('/webapp_products.json?' + Date.now());
-        products = await response.json();
-        renderCategories();
-        renderProducts();
-    } catch (error) {
-        console.error('Error loading products:', error);
-    }
-}
-
-function renderCategories() {
-    const categories = ['all', ...new Set(products.map(p => p.category))];
-    const container = document.getElementById('categories');
-    container.innerHTML = categories.map(cat => `
-        <button class="category-btn ${cat === currentCategory ? 'active' : ''}" onclick="filterByCategory('${cat}')">
-            ${cat === 'all' ? '🌟 Barchasi' : cat}
-        </button>
-    `).join('');
-}
-
-function filterByCategory(category) {
-    currentCategory = category;
-    renderCategories();
-    renderProducts();
-}
-
-function filterProducts() {
-    renderProducts();
-}
-
-function renderProducts() {
-    const search = document.getElementById('searchInput').value.toLowerCase();
-    let filtered = products;
-    
-    if (currentCategory !== 'all') {
-        filtered = filtered.filter(p => p.category === currentCategory);
-    }
-    
-    if (search) {
-        filtered = filtered.filter(p => p.name.toLowerCase().includes(search));
-    }
-    
-    const container = document.getElementById('products');
-    if (filtered.length === 0) {
-        container.innerHTML = '<div style="text-align:center;padding:40px">📭 Mahsulot topilmadi</div>';
-        return;
-    }
-    
-    container.innerHTML = filtered.map(product => {
-        const qty = cart[product.id] || 0;
-        return `
-            <div class="product-card">
-                <div class="product-image">${getCategoryIcon(product.category)}</div>
-                <div class="product-info">
-                    <div class="product-name">${escapeHtml(product.name)}</div>
-                    <div class="product-price">${formatPrice(product.price)} so'm</div>
-                    ${qty === 0 ? 
-                        `<button class="add-btn" onclick="addToCart(${product.id})">➕ Savatga</button>` :
-                        `<div style="display:flex;gap:8px;align-items:center;justify-content:space-between">
-                            <button class="add-btn" onclick="updateQuantity(${product.id}, -1)" style="width:40px">-</button>
-                            <span style="font-weight:700">${qty}</span>
-                            <button class="add-btn" onclick="updateQuantity(${product.id}, 1)" style="width:40px">+</button>
-                        </div>`
-                    }
-                </div>
-            </div>
-        `;
-    }).join('');
-}
-
-function getCategoryIcon(category) {
-    const icons = {
-        '👗 Kiyim': '👗', '👟 Poyabzal': '👟', '💄 Kosmetika': '💄',
-        '📱 Elektronika': '📱', '🏠 Uy jihozlari': '🏠', '🍕 Oziq-ovqat': '🍕'
-    };
-    return icons[category] || '🛍️';
-}
-
-function formatPrice(price) {
-    return price.toString().replace(/\\B(?=(\\d{3})+(?!\\d))/g, ' ');
-}
-
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
-function addToCart(productId) {
-    cart[productId] = (cart[productId] || 0) + 1;
-    updateCartUI();
-    renderProducts();
-    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
-}
-
-function updateQuantity(productId, delta) {
-    const newQty = (cart[productId] || 0) + delta;
-    if (newQty <= 0) {
-        delete cart[productId];
-    } else {
-        cart[productId] = newQty;
-    }
-    updateCartUI();
-    renderProducts();
-}
-
-function updateCartUI() {
-    const total = Object.values(cart).reduce((a,b) => a+b, 0);
-    document.getElementById('cartCount').textContent = total;
-    
-    let cartTotal = 0;
-    const cartItemsHtml = Object.entries(cart).map(([id, qty]) => {
-        const product = products.find(p => p.id == id);
-        if (!product) return '';
-        const subtotal = product.price * qty;
-        cartTotal += subtotal;
-        return `
-            <div class="cart-item">
-                <div>
-                    <div style="font-weight:600">${product.name}</div>
-                    <div style="font-size:12px;color:var(--muted)">${qty} x ${formatPrice(product.price)} so'm</div>
-                </div>
-                <div style="font-weight:700">${formatPrice(subtotal)} so'm</div>
-            </div>
-        `;
-    }).join('');
-    
-    document.getElementById('cartItems').innerHTML = cartItemsHtml || '<div style="padding:20px;text-align:center">Savat bo\'sh</div>';
-    document.getElementById('cartTotal').textContent = formatPrice(cartTotal) + ' so\'m';
-}
-
-function openCart() {
-    if (Object.keys(cart).length === 0) {
-        tg.showPopup({ message: 'Savat bo\'sh!' });
-        return;
-    }
-    document.getElementById('overlay').classList.add('show');
-    document.getElementById('cartModal').classList.add('show');
-}
-
-function closeCart() {
-    document.getElementById('overlay').classList.remove('show');
-    document.getElementById('cartModal').classList.remove('show');
-}
-
-function checkout() {
-    if (Object.keys(cart).length === 0) {
-        tg.showPopup({ message: 'Savat bo\'sh!' });
-        return;
-    }
-    
-    tg.showPopup({
-        title: 'Zakaz rasmiylashtirish',
-        message: 'Manzilingizni kiriting',
-        buttons: [{type: 'default', text: 'OK'}]
-    }, (buttonId) => {
-        tg.showPrompt({
-            title: 'Manzil',
-            message: 'Yetkazib berish manzili:',
-            placeholder: 'Toshkent, Yunusobod...'
-        }, (address) => {
-            if (address) {
-                const items = Object.entries(cart).map(([id, qty]) => {
-                    const p = products.find(p => p.id == id);
-                    return {id: p.id, name: p.name, price: p.price, qty};
-                });
-                
-                const orderData = {
-                    items: items,
-                    total: Object.entries(cart).reduce((sum, [id, qty]) => {
-                        const p = products.find(p => p.id == id);
-                        return sum + (p ? p.price * qty : 0);
-                    }, 0),
-                    address: address
-                };
-                
-                tg.sendData(JSON.stringify(orderData));
-                cart = {};
-                updateCartUI();
-                renderProducts();
-                closeCart();
-                
-                tg.showPopup({
-                    message: '✅ Zakaz qabul qilindi!\\nTez orada bog\'lanamiz.',
-                    buttons: [{type: 'ok'}]
-                });
-            }
-        });
-    });
-}
-
-loadProducts();
-</script>
-</body>
-</html>'''
-
-
-# ==================== MAIN ====================
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
