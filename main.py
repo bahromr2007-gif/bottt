@@ -626,20 +626,23 @@ def my_orders(message: types.Message):
     for order in orders[:10]:
         status_info = get_order_status_text(order.get("status", "new"))
         items_text = "\n".join([
-            f"  • {item.get('name', 'Noma\\'lum')} x{item.get('quantity', 1)} = {format_price(item.get('price', 0) * item.get('quantity', 1))} so'm"
+            f"  • {name} x{qty} = {format_price(price * qty)} so'm"
             for item in order.get("items", [])
+            for name in [item.get('name', "Noma'lum")]
+            for qty in [item.get('quantity', 1)]
+            for price in [item.get('price', 0)]
         ])
 
         text = f"""
 {status_info['emoji']} *Zakaz #{order['id']}*
-📅 {order.get('date', 'Noma\\'lum')}
+📅 {order.get('date', "Noma'lum")}
 💰 {format_price(order.get('total', 0))} so'm
 📊 *Holat:* {status_info['text']}
 
 📦 *Mahsulotlar:*
 {items_text}
 
-📍 *Manzil:* {order.get('address', 'Noma\\'lum')}
+📍 *Manzil:* {order.get('address', "Noma'lum")}
 """
         if order.get("eta"):
             text += f"\n⏱ *Yetib borish vaqti:* {order['eta']}"
@@ -852,11 +855,11 @@ def admin_list_orders(message: types.Message):
         status_info = get_order_status_text(order.get("status", "new"))
         text = f"""
 {status_info['emoji']} *Zakaz #{order['id']}*
-👤 {escape_markdown(order.get('user_name', 'Noma\\'lum'))}
-📞 {order.get('user_phone', 'Noma\\'lum')}
-📍 {order.get('address', 'Noma\\'lum')}
+👤 {escape_markdown(order.get('user_name', "Noma'lum"))}
+📞 {order.get('user_phone', "Noma'lum")}
+📍 {order.get('address', "Noma'lum")}
 💰 {format_price(order.get('total', 0))} so'm
-📅 {order.get('date', 'Noma\\'lum')}
+📅 {order.get('date', "Noma'lum")}
 📊 Holat: {status_info['text']}
 """
         bot.send_message(message.chat.id, text, reply_markup=get_order_status_keyboard(order["id"]))
@@ -957,10 +960,10 @@ def admin_users_list(message: types.Message):
 
     text = "👥 *Foydalanuvchilar ro'yxati:*\n\n"
     for user in users[:20]:
-        text += f"• {escape_markdown(user.get('name', 'Noma\\'lum'))}\n"
-        text += f"  📞 {user.get('phone', 'Noma\\'lum')}\n"
+        text += f"• {escape_markdown(user.get('name', "Noma'lum"))}\n"
+        text += f"  📞 {user.get('phone', "Noma'lum")}\n"
         text += f"  🆔 {user.get('user_id')}\n"
-        text += f"  📅 {user.get('joined', 'Noma\\'lum')}\n"
+        text += f"  📅 {user.get('joined', "Noma'lum")}\n"
         text += f"  💰 {format_price(user.get('total_spent', 0))} so'm\n\n"
     bot.send_message(message.chat.id, text)
 
@@ -1099,11 +1102,12 @@ def handle_create_promo(message: types.Message):
 
             db.add_promo(promo)
 
+            discount_text = f"📊 Chegirma: {promo['discount_value']}%" if promo['discount_type'] == 'percentage' else f"💰 Chegirma: {format_price(promo['discount_value'])} so'm"
             bot.send_message(
                 message.chat.id,
                 f"✅ *Promo kod yaratildi!*\n\n"
                 f"🎁 *Kod:* {promo['code']}\n"
-                f"{'📊 Chegirma: ' + str(promo['discount_value']) + '%' if promo['discount_type'] == 'percentage' else '💰 Chegirma: ' + format_price(promo['discount_value']) + ' so\\'m'}\n"
+                f"{discount_text}\n"
                 f"📅 Muddati: {expiry_date.strftime('%Y-%m-%d')}",
                 reply_markup=get_admin_keyboard()
             )
@@ -1221,6 +1225,8 @@ def handle_web_app_order(message: types.Message):
             for item in items
         ])
 
+        discount_line = f'🎁 Chegirma: -{format_price(discount_amount)} so\'m ({discount_percent}%)' if discount_amount else ''
+
         text = f"""
 ✅ *Zakaz #{saved_order['id']} qabul qilindi!*
 
@@ -1229,7 +1235,7 @@ def handle_web_app_order(message: types.Message):
 
 💰 *Hisob:*
 Mahsulotlar: {format_price(subtotal)} so'm
-{f'🎁 Chegirma: -{format_price(discount_amount)} so\\'m ({discount_percent}%)' if discount_amount else ''}
+{discount_line}
 🚚 Yetkazib berish: {format_price(delivery_fee)} so'm
 
 📊 *JAMI: {format_price(total)} so'm*
@@ -1245,7 +1251,7 @@ Mahsulotlar: {format_price(subtotal)} so'm
 🆕 *YANGI ZAKAZ #{saved_order['id']}*
 
 👤 {message.from_user.first_name}
-📞 {user.get('phone", 'Noma\\'lum')}
+📞 {user.get('phone', "Noma'lum")}
 📍 {address}
 
 📦 *Mahsulotlar:*
