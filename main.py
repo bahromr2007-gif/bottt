@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Any
 # ============ KONFIGURATSIYA ============
 # Eslatma:
 # Pastdagi qiymatlarni o'zingiznikiga almashtiring.
-BOT_TOKEN = os.getenv("BOT_TOKEN", "TOKENNI_BU_YERGA_QOYING")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8778358404:AAHmM4e2OnROyXLCsGXERCbXd3arzl7kPS0")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "https://your-render-app.onrender.com")
 WEB_APP_URL = f"{RENDER_EXTERNAL_URL}/shop"
 ADMIN_IDS = [8735360012]
