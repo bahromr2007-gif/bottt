@@ -1497,5 +1497,14 @@ def ensure_demo_products():
 ensure_demo_products()
 
 
+def start_telegram_polling():
+    try:
+        bot.remove_webhook()
+    except Exception:
+        pass
+    bot.infinity_polling(skip_pending=True)
+
+
 if __name__ == "__main__":
+    threading.Thread(target=start_telegram_polling, daemon=True).start()
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=True)
